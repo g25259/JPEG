@@ -86,14 +86,18 @@ void readQuantizationTable(unsigned char *quantizationTable) {
     int size = 0;
     int over = 0;
     unsigned char buf[4];
-    while (!over ) {
+    while (over != 2 ) {
 
-        fread(buf, sizeof(unsigned char), 2, imageInput);
-        size += 2;
+        fread(buf, sizeof(unsigned char), 1, imageInput);
+        size ++;
         printf("%x", buf[0]);
-        printf("%x", buf[1]);
-        if (buf[0] == 255 && buf[1] == 219) {
-            over ++ ;
+        if (buf[0] == 255 || over == 1) {
+
+            if(buf[0] == 219 && over == 1){
+                over = 2;
+            }else if(over != 1) {
+                over = 0;
+            }
         }
 
     }
