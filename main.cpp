@@ -139,43 +139,101 @@ inline int ParseDQT(stJpegData *jdec, const unsigned char* stream){
     int Pq = *stream >> 4;
     int Tq = *stream & 0xf ;
     stream++;
-    //printf("Pq: %d  Tq: %d\n", Pq, Tq);
+    printf("Pq: %d  Tq: %d\n", Pq, Tq);
 
     quantizationTable = jdec->m_Q_tables[Tq];
     for(int i = 0; i < 64; i++){
         quantizationTable[i] = stream[i];
+        //printf("%d\n", quantizationTable[i]);
     }
 
 
 }
 
-inline int ParseSOS(stJpegData *jdec, const unsigned char* stream){
+
+inline int GenerateHuffmanCodes(stHuffmanTable * huffmanTable){
+
+    int i = 0, codeValue = 0;
+
+    for(int k = 1; k <= 16; k++){
+        for(int j = 1; j <= huffmanTable->m_length[k]; j++){
+            huffmanTable->m_blocks[i].code = codeValue;
+            huffmanTable->m_blocks[i].value = huffmanTable->m_hufVal[i];
+            codeValue++;
+            i++;
+
+        }
+        codeValue *= 2;
+
+    }
+
+}
+inline int BuildHuffmanTable(stHuffmanTable *huffmanTable, const unsigned char* stream){
+    int count = 0;
+
+    for(int i = 1; i < 17; i++){
+        huffmanTable->m_length[i] = *stream++;
+        count+= huffmanTable->m_length[i];
+    }
+
+    for(int i = 0; i < count; i++){
+        huffmanTable->m_hufVal[i] = *stream++;
+    }
+    huffmanTable->m_numBlocks = count;
+
+    count = 0;
+    for(int i = 0; i < 17; i++){
+        for(int j = 0; j < huffmanTable->m_length[i]; j++){
+            huffmanTable->m_blocks[count].length = i;
+            count++;
+        }
+    }
 
 
+    GenerateHuffmanCodes(huffmanTable);
 }
 inline int ParseDHT(stJpegData *jdec, const unsigned char* stream){
     int Lh = BYTE_TO_WORD(stream);
-    int TableClassNIdentifier = stream[0];
+    stream += 2;                            //skip length
+    int TableClassNIdentifier = *stream++;
     int Tc = TableClassNIdentifier >> 4;
     int Th = TableClassNIdentifier & 0xf;
     stHuffmanTable *huffmanTable;
     int count = 0;               //Number of Huffman codes
 
     // Build DC Huffman or AC Huffman
-    if(Tc == 0)
-        huffmanTable = &jdec->m_HTDC[Th];
-    else if(Tc == 1)
-        huffmanTable = &jdec->m_HTAC[Th];
-    for(int i = 1; i < 17; i++){
-        huffmanTable->m_length[i] = *stream++;
-        count+= huffmanTable->m_length[i];
+    printf("Length : %d Tc:%d  Th: %d",Lh, Tc,Th);
+
+    if(Tc == 0){
+        BuildHuffmanTable(&jdec->m_HTDC[Th], stream);
     }
-    for(int i = 0; i < count; i++)
-        huffmanTable->m_hufVal[i] = *stream++;
+
+    else{
+        BuildHuffmanTable(&jdec->m_HTAC[Th], stream);
+    }
 
 
 
+}
 
+inline int ParseSOS(stJpegData *jdec, const unsigned char* stream){
+    int Ls = BYTE_TO_WORD(stream);
+    stream += 2;            //skip length
+    int Ns = *stream++;      //Number of image components in scan
+    int Cs;
+    int TableDCNACSelector;
+
+
+    for(int i = 0; i < Ns; i++){
+        Cs = *stream++;
+        TableDCNACSelector = *stream++;
+        jdec->m_component_info[Cs].m_dcTable = &jdec->m_HTDC[TableDCNACSelector >> 4];
+        jdec->m_component_info[Cs].m_acTable = &jdec->m_HTAC[TableDCNACSelector & 0xf];
+
+    }
+
+    jdec->m_stream = stream+3;
+    return 0;
 
 }
 inline int parseJFIF(stJpegData *jdec, const unsigned char * stream){
@@ -282,12 +340,19 @@ inline int parseHeader(stJpegData *jdec, const unsigned char *buf){
     printf("It should a JPEG file\n");
 
     const unsigned  char* position = buf + 2;
-    parseJFIF(jdec, position);
+    return parseJFIF(jdec, position);
+    
+}
+int Decode(stJpegData *jdec){
+
 
 }
 int JpegDecoder(const unsigned char *buf, const unsigned int fileSize){
     stJpegData* jdec = new stJpegData();
-    parseHeader(jdec, buf);
+    if(!parseHeader(jdec, buf))
+        return 0;
+    Decode(jdec);
+    
 
 }
 int test(const unsigned char * stream){
