@@ -344,12 +344,53 @@ inline int parseHeader(stJpegData *jdec, const unsigned char *buf){
     
 }
 int Decode(stJpegData *jdec){
+    int hFactor = jdec->m_component_info[cY].m_hFactor;
+    int vFactor = jdec->m_component_info[cY].m_vFactor;
+
+    // RGB24:
+    if (jdec->m_rgb == NULL) {
+        int h = jdec->m_height * 3;
+        int w = jdec->m_width * 3;
+        int height = h + (8 * hFactor) - (h % (8 * hFactor));
+        int width = w + (8 * vFactor) - (w % (8 * vFactor));
+        jdec->m_rgb = new unsigned char[width * height];
+
+        memset(jdec->m_rgb, 0, width * height);
+    }
+
+    jdec->m_component_info[0].m_previousDC = 0;
+    jdec->m_component_info[1].m_previousDC = 0;
+    jdec->m_component_info[2].m_previousDC = 0;
+    jdec->m_component_info[3].m_previousDC = 0;
+
+    int xstride_by_mcu = 8 * hFactor;
+    int ystride_by_mcu = 8 * vFactor;
+
+    // Don't forget to that block can be either 8 or 16 lines
+    unsigned int bytes_per_blocklines = jdec->m_width * 3 * ystride_by_mcu;
+
+    unsigned int bytes_per_mcu = 3 * xstride_by_mcu;
+
+    // Just the decode the image by 'macroblock' (size is 8x8, 8x16, or 16x16)
+    for (int y = 0; y < (int) jdec->m_height; y += ystride_by_mcu) {
+        for (int x = 0; x < (int) jdec->m_width; x += xstride_by_mcu) {
+            jdec->m_colourspace = jdec->m_rgb + x * 3 + (y * jdec->m_width * 3);
+
+            // Decode MCU Plane
+            //DecodeMCU(jdec, hFactor, vFactor);
+
+            //YCrCB_to_RGB24_Block8x8(jdec, hFactor, vFactor, x, y, jdec->m_width, jdec->m_height);
+        }
+    }
+
+
+    return 0;
 
 
 }
 int JpegDecoder(const unsigned char *buf, const unsigned int fileSize){
     stJpegData* jdec = new stJpegData();
-    if(!parseHeader(jdec, buf))
+    if(parseHeader(jdec, buf))
         return 0;
     Decode(jdec);
     
