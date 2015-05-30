@@ -343,43 +343,260 @@ inline int parseHeader(stJpegData *jdec, const unsigned char *buf){
     return parseJFIF(jdec, position);
     
 }
+
+
+bool IsInHuffmanCodes(int code, int numCodeBits, int numBlocks, stBlock *blocks, int *decodedValue) {
+    for (int i = 0; i < numBlocks; i++) {
+        int hufhCode = blocks[i].code;
+        int hufCodeLenBits = blocks[i].length;
+        int hufValue = blocks[i].value;
+
+        // We've got a match!
+        if ((code == hufhCode) && (numCodeBits == hufCodeLenBits)) {
+            *decodedValue = hufValue;
+            return true;
+        }
+    }
+    return false;
+}
+
+
+inline int LookKBits(const unsigned char **stream, int kBits){
+
+}
+
+
+
+
+void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
+    stComponent *c = &jdata->m_component_info[indx];
+
+
+    short DCT_tcoeff[64];
+    memset(DCT_tcoeff, 0, sizeof(DCT_tcoeff)); //Initialize DCT_tcoeff
+
+    int decodedValue = 0;
+
+    // First thing is get the 1 DC coefficient at the start of our 64 element
+    // block
+    for (int k = 1; k < 16; k++) {
+
+
+        // Keep grabbing one bit at a time till we find one thats a huffman code
+        int code = LookKBits(&jdata->m_stream, k);
+
+        // Check if its one of our huffman codes
+        if (IsInHuffmanCodes(code, k, c->m_dcTable->m_numBlocks, c->m_dcTable->m_blocks, &decodedValue)) {
+            // Skip over the rest of the bits now.
+            SkipNBits(&jdata->m_stream, k);
+
+            // The decoded value is the number of bits we have to read in next
+            int numDataBits = decodedValue;
+
+            // We know the next k bits are for the actual data
+            if (numDataBits == 0) {
+                DCT_tcoeff[0] = c->m_previousDC;
+            }
+            else {
+                short data = GetNBits(&jdata->m_stream, numDataBits);
+
+                data = DetermineSign(data, numDataBits);
+
+                DCT_tcoeff[0] = data + c->m_previousDC;
+                c->m_previousDC = DCT_tcoeff[0];
+            }
+
+            // Found so we can exit out
+            break;
+        }
+    }
+
+
+    // Second, the 63 AC coefficient
+    int nr = 1;
+    bool EOB_found = false;
+    while ((nr <= 63) && (!EOB_found)) {
+        int k = 0;
+        for (k = 1; k <= 16; k++) {
+            // Keep grabbing one bit at a time till we find one thats a huffman code
+            int code = LookKBits(&jdata->m_stream, k);
+
+
+            // Check if its one of our huffman codes
+            if (IsInHuffmanCodes(code, k, c->m_acTable->m_numBlocks, c->m_acTable->m_blocks, &decodedValue)) {
+
+                // Skip over k bits, since we found the huffman value
+                SkipNBits(&jdata->m_stream, k);
+
+
+                // Our decoded value is broken down into 2 parts, repeating RLE, and then
+                // the number of bits that make up the actual value next
+                int valCode = decodedValue;
+
+                unsigned char size_val = valCode & 0xF;    // Number of bits for our data
+                unsigned char count_0 = valCode >> 4;    // Number RunLengthZeros
+
+                if (size_val == 0) {// RLE
+                    if (count_0 == 0)EOB_found = true;    // EOB found, go out
+                    else if (count_0 == 0xF) nr += 16;  // skip 16 zeros
+                }
+                else {
+                    nr += count_0; //skip count_0 zeroes
+
+                    if (nr > 63) {
+                        printf("-|- ##ERROR## Huffman Decoding\n");
+                    }
+
+                    short data = GetNBits(&jdata->m_stream, size_val);
+
+                    data = DetermineSign(data, size_val);
+
+                    DCT_tcoeff[nr++] = data;
+
+                }
+                break;
+            }
+        }
+
+        if (k > 16) {
+            nr++;
+        }
+    }
+
+
+    DumpDCTValues(DCT_tcoeff);
+
+
+    // We've decoded a block of data, so copy it across to our buffer
+    for (int j = 0; j < 64; j++) {
+        c->m_DCT[j] = DCT_tcoeff[j];
+    }
+
+}
+
+
+
+
+
+inline void ConvertYCrCbtoRGB(int y, int cb, int cr,
+                              int *r, int *g, int *b) {
+    float red, green, blue;
+
+    red = y + 1.402f * (cb - 128);
+    green = y - 0.34414f * (cr - 128) - 0.71414f * (cb - 128);
+    blue = y + 1.772f * (cr - 128);
+
+    *r = (int) Clamp((int) red);
+    *g = (int) Clamp((int) green);
+    *b = (int) Clamp((int) blue);
+}
+
+
+
+inline void YCrCB_to_RGB24_Block8x8(stJpegData *jdata, int w, int h, int imgx, int imgy, int imgw, int imgh) {
+    const unsigned char *Y, *Cb, *Cr;
+    unsigned char *pix;
+
+    int r, g, b;
+
+    Y = jdata->m_Y;
+    Cb = jdata->m_Cb;
+    Cr = jdata->m_Cr;
+
+    int olw = 0; // overlap
+    if (imgx > (imgw - 8 * w)) {
+        olw = imgw - imgx;
+    }
+
+    int olh = 0; // overlap
+    if (imgy > (imgh - 8 * h)) {
+        olh = imgh - imgy;
+    }
+
+//	dprintf("***pix***\n\n");
+    for (int y = 0; y < (8 * h - olh); y++) {
+        for (int x = 0; x < (8 * w - olw); x++) {
+            int poff = x * 3 + jdata->m_width * 3 * y;
+            pix = &(jdata->m_colourspace[poff]);
+
+            int yoff = x + y * (w * 8);
+            int coff = (int) (x * (1.0f / w)) + (int) (y * (1.0f / h)) * 8;
+
+            int yc = Y[yoff];
+            int cb = Cb[coff];
+            int cr = Cr[coff];
+
+            ConvertYCrCbtoRGB(yc, cr, cb, &r, &g, &b);
+
+            pix[0] = Clamp(r);
+            pix[1] = Clamp(g);
+            pix[2] = Clamp(b);
+
+//			dprintf("-[%d][%d][%d]-\t", poff, yoff, coff);
+        }
+//		dprintf("\n");
+    }
+//	dprintf("\n\n");
+}
+
+
+
+inline void DecodeMCU(stJpegData *jdata, int w, int h) {
+    // Y
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int stride = w * 8;
+            int offset = x * 8 + y * 64 * w;
+
+            ProcessHuffmanDataUnit(jdata, cY);
+
+            DecodeSingleBlock(&jdata->m_component_info[cY], &jdata->m_Y[offset], stride);
+        }
+    }
+
+    // Cb
+    ProcessHuffmanDataUnit(jdata, cCb);
+    DecodeSingleBlock(&jdata->m_component_info[cCb], jdata->m_Cb, 8);
+
+    // Cr
+    ProcessHuffmanDataUnit(jdata, cCr);
+    DecodeSingleBlock(&jdata->m_component_info[cCr], jdata->m_Cr, 8);
+}
+
+
 int Decode(stJpegData *jdec){
-    int hFactor = jdec->m_component_info[cY].m_hFactor;
-    int vFactor = jdec->m_component_info[cY].m_vFactor;
+    int horizontalFactor = jdec->m_component_info[cY].m_hFactor;
+    int verticalFactor = jdec->m_component_info[cY].m_vFactor;
 
     // RGB24:
     if (jdec->m_rgb == NULL) {
         int h = jdec->m_height * 3;
         int w = jdec->m_width * 3;
-        int height = h + (8 * hFactor) - (h % (8 * hFactor));
-        int width = w + (8 * vFactor) - (w % (8 * vFactor));
+        int height = h + (8 * horizontalFactor) - (h % (8 * horizontalFactor));
+        int width = w + (8 * verticalFactor) - (w % (8 * verticalFactor));
         jdec->m_rgb = new unsigned char[width * height];
 
         memset(jdec->m_rgb, 0, width * height);
     }
 
-    jdec->m_component_info[0].m_previousDC = 0;
-    jdec->m_component_info[1].m_previousDC = 0;
-    jdec->m_component_info[2].m_previousDC = 0;
-    jdec->m_component_info[3].m_previousDC = 0;
+    for(int i = 0; i < 4; i++){
+        jdec->m_component_info[i].m_previousDC = 0;
+    }
 
-    int xstride_by_mcu = 8 * hFactor;
-    int ystride_by_mcu = 8 * vFactor;
 
-    // Don't forget to that block can be either 8 or 16 lines
-    unsigned int bytes_per_blocklines = jdec->m_width * 3 * ystride_by_mcu;
+    int x_stride_by_mcu = 8 * horizontalFactor;
+    int y_stride_by_mcu = 8 * verticalFactor;
 
-    unsigned int bytes_per_mcu = 3 * xstride_by_mcu;
 
     // Just the decode the image by 'macroblock' (size is 8x8, 8x16, or 16x16)
-    for (int y = 0; y < (int) jdec->m_height; y += ystride_by_mcu) {
-        for (int x = 0; x < (int) jdec->m_width; x += xstride_by_mcu) {
+    for (int y = 0; y < (int) jdec->m_height; y += y_stride_by_mcu) {
+        for (int x = 0; x < (int) jdec->m_width; x += x_stride_by_mcu) {
             jdec->m_colourspace = jdec->m_rgb + x * 3 + (y * jdec->m_width * 3);
 
             // Decode MCU Plane
-            //DecodeMCU(jdec, hFactor, vFactor);
+            DecodeMCU(jdec, horizontalFactor, verticalFactor);
 
-            //YCrCB_to_RGB24_Block8x8(jdec, hFactor, vFactor, x, y, jdec->m_width, jdec->m_height);
+            YCrCB_to_RGB24_Block8x8(jdec, horizontalFactor, verticalFactor, x, y, jdec->m_width, jdec->m_height);
         }
     }
 
@@ -403,7 +620,6 @@ int test(const unsigned char * stream){
 int main() {
 
     FILE *imageInput;
-    FILE *imageOutput;
     unsigned  int lengthOfJpegImage;
     unsigned char *buffer;
 
