@@ -93,7 +93,66 @@ static int ZigZagArray[64] =
                 35,  36, 48,  49,  57,  58,  62,  63,
         };
 
+inline unsigned char Clamp(int i) {
+    if (i < 0)
+        return 0;
+    else if (i > 255)
+        return 255;
+    else
+        return i;
+}
 
+
+void DequantizeBlock(int block[64], const float quantBlock[64]) {
+    for (int c = 0; c < 64; c++) {
+        block[c] = (int) (block[c] * quantBlock[c]);
+    }
+}
+
+
+void DeZigZag(int outBlock[64], const int inBlock[64]) {
+    for (int i = 0; i < 64; i++) {
+        outBlock[i] = inBlock[ZigZagArray[i]];
+    }
+}
+
+
+void TransformArray(int outArray[8][8], const int inArray[64]) {
+    int cc = 0;
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            outArray[x][y] = inArray[cc];
+            cc++;
+        }
+    }
+}
+
+
+float C(int u) {
+    if (u == 0)
+        return (1.0f / sqrtf(2));
+    else
+        return 1.0f;
+}
+
+int func(int x, int y, const int block[8][8]) {
+    const float PI = 3.14f;
+    float sum = 0;
+    for (int u = 0; u < 8; u++) {
+        for (int v = 0; v < 8; v++) {
+            sum += (C(u) * C(v)) * block[u][v] * cosf(((2 * x + 1) * u * PI) / 16) * cosf(((2 * y + 1) * v * PI) / 16);
+        }
+    }
+    return (int) ((1.0 / 4.0) * sum);
+}
+
+void PerformIDCT(int outBlock[8][8], const int inBlock[8][8]) {
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            outBlock[x][y] = func(x, y, inBlock);
+        }
+    }
+}
 
 inline int FileSize(FILE *fp)
 {
@@ -345,15 +404,14 @@ inline int parseHeader(stJpegData *jdec, const unsigned char *buf){
 }
 
 
-bool IsInHuffmanCodes(int code, int numCodeBits, int numBlocks, stBlock *blocks, int *decodedValue) {
-    for (int i = 0; i < numBlocks; i++) {
-        int hufhCode = blocks[i].code;
-        int hufCodeLenBits = blocks[i].length;
-        int hufValue = blocks[i].value;
-
-        // We've got a match!
-        if ((code == hufhCode) && (numCodeBits == hufCodeLenBits)) {
-            *decodedValue = hufValue;
+bool IsInHuffmanCodes(int code, int numberOfCodeBits, int numberOfBlocks, stBlock *blocks, int *decodedValue) {
+    for (int i = 0; i < numberOfBlocks; i++) {
+        int huffmanCode = blocks[i].code;
+        int huffmanCodeLength = blocks[i].length;
+        int huffmanValue = blocks[i].value;
+        
+        if ((code == huffmanCode) && (numberOfCodeBits == huffmanCodeLength)) {
+            *decodedValue = huffmanValue;
             return true;
         }
     }
@@ -361,72 +419,117 @@ bool IsInHuffmanCodes(int code, int numCodeBits, int numBlocks, stBlock *blocks,
 }
 
 
-inline int LookKBits(const unsigned char **stream, int kBits){
+int DetermineSign(int val, int nBits) {
+    bool negative = val < (1 << (nBits - 1));
 
+    if (negative) {
+        // (-1 << (s)), makes the last bit a 1, so we have 1000,0000 for example for 8 bits
+
+        val = val + (-1 << (nBits)) + 1;
+    }
+
+    // Else its unsigned, just return
+    return val;
+}
+
+int reservoirBits = 0;
+int bitInReservoir = 0;
+
+inline int FillKBits(const unsigned char **stream, int kBits){
+    while(bitInReservoir < reservoirBits){
+        const unsigned char nextByte = *(*stream)++;
+        reservoirBits <<= 8;
+        if(nextByte == 0xff && (**stream) == 0x00)
+            (*stream)++;
+        reservoirBits |= nextByte;
+        bitInReservoir += 8;
+    }
+}
+
+
+inline int LookKBits(const unsigned char **stream, int kBits){
+    FillKBits(stream, kBits);
+
+    int result =((reservoirBits) >> (bitInReservoir - (kBits)));
+    return  result;
+}
+
+inline void SkipKBits(const unsigned char **stream, int &nbits_wanted) {
+    FillKBits(stream, nbits_wanted);
+
+    bitInReservoir -= (nbits_wanted);
+    reservoirBits &= ((1U << bitInReservoir) - 1);
+
+}
+
+inline short GetNBits(const unsigned char **stream, int nbits_wanted) {
+    FillKBits(stream, nbits_wanted);
+
+    short result = ((reservoirBits) >> (bitInReservoir - (nbits_wanted)));
+
+    bitInReservoir -= (nbits_wanted);
+    reservoirBits &= ((1U << bitInReservoir) - 1);
+
+    return result;
 }
 
 
 
-
 void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
-    stComponent *c = &jdata->m_component_info[indx];
+    stComponent *stComponent = &jdata->m_component_info[indx];
 
 
     short DCT_tcoeff[64];
     memset(DCT_tcoeff, 0, sizeof(DCT_tcoeff)); //Initialize DCT_tcoeff
 
     int decodedValue = 0;
-
-    // First thing is get the 1 DC coefficient at the start of our 64 element
-    // block
+    
     for (int k = 1; k < 16; k++) {
 
 
-        // Keep grabbing one bit at a time till we find one thats a huffman code
+        
         int code = LookKBits(&jdata->m_stream, k);
-
-        // Check if its one of our huffman codes
-        if (IsInHuffmanCodes(code, k, c->m_dcTable->m_numBlocks, c->m_dcTable->m_blocks, &decodedValue)) {
+        
+        if (IsInHuffmanCodes(code, k, stComponent->m_dcTable->m_numBlocks, stComponent->m_dcTable->m_blocks, &decodedValue)) {
             // Skip over the rest of the bits now.
-            SkipNBits(&jdata->m_stream, k);
+            SkipKBits(&jdata->m_stream, k);
 
             // The decoded value is the number of bits we have to read in next
             int numDataBits = decodedValue;
 
             // We know the next k bits are for the actual data
             if (numDataBits == 0) {
-                DCT_tcoeff[0] = c->m_previousDC;
+                DCT_tcoeff[0] = stComponent->m_previousDC;
             }
             else {
                 short data = GetNBits(&jdata->m_stream, numDataBits);
 
                 data = DetermineSign(data, numDataBits);
 
-                DCT_tcoeff[0] = data + c->m_previousDC;
-                c->m_previousDC = DCT_tcoeff[0];
+                DCT_tcoeff[0] = data + stComponent->m_previousDC;
+                stComponent->m_previousDC = DCT_tcoeff[0];
             }
 
-            // Found so we can exit out
             break;
         }
     }
 
 
     // Second, the 63 AC coefficient
-    int nr = 1;
+    int filledNumber = 1;
     bool EOB_found = false;
-    while ((nr <= 63) && (!EOB_found)) {
+    while ((filledNumber < 64) && (!EOB_found)) {
         int k = 0;
         for (k = 1; k <= 16; k++) {
-            // Keep grabbing one bit at a time till we find one thats a huffman code
+           
             int code = LookKBits(&jdata->m_stream, k);
 
 
             // Check if its one of our huffman codes
-            if (IsInHuffmanCodes(code, k, c->m_acTable->m_numBlocks, c->m_acTable->m_blocks, &decodedValue)) {
+            if (IsInHuffmanCodes(code, k, stComponent->m_acTable->m_numBlocks, stComponent->m_acTable->m_blocks, &decodedValue)) {
 
                 // Skip over k bits, since we found the huffman value
-                SkipNBits(&jdata->m_stream, k);
+                SkipKBits(&jdata->m_stream, k);
 
 
                 // Our decoded value is broken down into 2 parts, repeating RLE, and then
@@ -438,12 +541,12 @@ void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
 
                 if (size_val == 0) {// RLE
                     if (count_0 == 0)EOB_found = true;    // EOB found, go out
-                    else if (count_0 == 0xF) nr += 16;  // skip 16 zeros
+                    else if (count_0 == 0xF) filledNumber += 16;  // skip 16 zeros
                 }
                 else {
-                    nr += count_0; //skip count_0 zeroes
+                    filledNumber += count_0; //skip count_0 zeroes
 
-                    if (nr > 63) {
+                    if (filledNumber > 63) {
                         printf("-|- ##ERROR## Huffman Decoding\n");
                     }
 
@@ -451,7 +554,7 @@ void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
 
                     data = DetermineSign(data, size_val);
 
-                    DCT_tcoeff[nr++] = data;
+                    DCT_tcoeff[filledNumber++] = data;
 
                 }
                 break;
@@ -459,17 +562,13 @@ void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
         }
 
         if (k > 16) {
-            nr++;
+            filledNumber++;
         }
     }
 
 
-    DumpDCTValues(DCT_tcoeff);
-
-
-    // We've decoded a block of data, so copy it across to our buffer
     for (int j = 0; j < 64; j++) {
-        c->m_DCT[j] = DCT_tcoeff[j];
+        stComponent->m_DCT[j] = DCT_tcoeff[j];
     }
 
 }
@@ -532,15 +631,117 @@ inline void YCrCB_to_RGB24_Block8x8(stJpegData *jdata, int w, int h, int imgx, i
             pix[1] = Clamp(g);
             pix[2] = Clamp(b);
 
-//			dprintf("-[%d][%d][%d]-\t", poff, yoff, coff);
+
         }
-//		dprintf("\n");
+
     }
-//	dprintf("\n\n");
+
+}
+inline void WriteBMP24(const char *szBmpFileName, int Width, int Height, unsigned char *RGB) {
+#pragma pack(1)
+    struct stBMFH // BitmapFileHeader & BitmapInfoHeader
+    {
+        // BitmapFileHeader
+        char bmtype[2];     // 2 bytes - 'B' 'M'
+        unsigned int iFileSize;     // 4 bytes
+        short int reserved1;     // 2 bytes
+        short int reserved2;     // 2 bytes
+        unsigned int iOffsetBits;   // 4 bytes
+        // End of stBMFH structure - size of 14 bytes
+        // BitmapInfoHeader
+        unsigned int iSizeHeader;    // 4 bytes - 40
+        unsigned int iWidth;         // 4 bytes
+        unsigned int iHeight;        // 4 bytes
+        short int iPlanes;        // 2 bytes
+        short int iBitCount;      // 2 bytes
+        unsigned int Compression;    // 4 bytes
+        unsigned int iSizeImage;     // 4 bytes
+        unsigned int iXPelsPerMeter; // 4 bytes
+        unsigned int iYPelsPerMeter; // 4 bytes
+        unsigned int iClrUsed;       // 4 bytes
+        unsigned int iClrImportant;  // 4 bytes
+        // End of stBMIF structure - size 40 bytes
+        // Total size - 54 bytes
+    };
+#pragma pack()
+
+    // Round up the width to the nearest DWORD boundary
+    int iNumPaddedBytes = 4 - (Width * 3) % 4;
+    iNumPaddedBytes = iNumPaddedBytes % 4;
+
+    stBMFH bh;
+    memset(&bh, 0, sizeof(bh));
+    bh.bmtype[0] = 'B';
+    bh.bmtype[1] = 'M';
+    bh.iFileSize = (Width * Height * 3) + (Height * iNumPaddedBytes) + sizeof(bh);
+    bh.iOffsetBits = sizeof(stBMFH);
+    bh.iSizeHeader = 40;
+    bh.iPlanes = 1;
+    bh.iWidth = Width;
+    bh.iHeight = Height;
+    bh.iBitCount = 24;
+
+
+    char temp[1024] = {0};
+    sprintf(temp, "%s", "C:\\Users\\g2525_000\\ClionProjects\\JPEG\\gig-sn01.bmp");
+    FILE *fp = fopen(temp, "wb");
+    fwrite(&bh, sizeof(bh), 1, fp);
+    for (int y = Height - 1; y >= 0; y--) {
+        for (int x = 0; x < Width; x++) {
+            int i = (x + (Width) * y) * 3;
+            unsigned int rgbpix = (RGB[i] << 16) | (RGB[i + 1] << 8) | (RGB[i + 2] << 0);
+            fwrite(&rgbpix, 3, 1, fp);
+        }
+        if (iNumPaddedBytes > 0) {
+            unsigned char pad = 0;
+            fwrite(&pad, iNumPaddedBytes, 1, fp);
+        }
+    }
+    fclose(fp);
 }
 
+inline void DecodeSingleBlock(stComponent *comp, unsigned char *outputBuf, int stride) {
+    short *inptr = comp->m_DCT;
+    float *quantptr = comp->m_qTable;
 
 
+    // Create a temp 8x8, i.e. 64 array for the data
+    int data[64] = {0};
+
+    // Copy our data into the temp array
+    for (int i = 0; i < 64; i++) {
+        data[i] = inptr[i];
+    }
+
+    // De-Quantize
+    DequantizeBlock(data, quantptr);
+
+    // De-Zig-Zag
+    int block[64] = {0};
+    DeZigZag(block, data);
+
+    // Create an 8x8 array
+    int arrayBlock[8][8] = {0};
+    TransformArray(arrayBlock, block);
+
+    // Inverse DCT
+    int val[8][8] = {0};
+    PerformIDCT(val, arrayBlock);
+
+    // Level Shift each element (i.e. add 128), and copy to our
+    // output
+    unsigned char *outptr = outputBuf;
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            val[x][y] += 128;
+
+            outptr[x] = Clamp(val[x][y]);
+        }
+
+        outptr += stride;
+    }
+
+}
 inline void DecodeMCU(stJpegData *jdata, int w, int h) {
     // Y
     for (int y = 0; y < h; y++) {
@@ -605,18 +806,30 @@ int Decode(stJpegData *jdec){
 
 
 }
-int JpegDecoder(const unsigned char *buf, const unsigned int fileSize){
+inline void JpegGetImageSize(stJpegData *jdata, unsigned int *width, unsigned int *height) {
+    *width = jdata->m_width;
+    *height = jdata->m_height;
+}
+
+int JpegDecoder(const unsigned char *buf, const unsigned int fileSize, unsigned char **rgbpix,
+                unsigned int *width,        // Output image width
+                unsigned int *height){
     stJpegData* jdec = new stJpegData();
     if(parseHeader(jdec, buf))
         return 0;
     Decode(jdec);
-    
 
+    JpegGetImageSize(jdec, width, height);
+
+    *rgbpix = jdec->m_rgb;
+
+    // Release the memory for our jpeg decoder structure jdec
+    delete jdec;
+
+    return 1;
 }
-int test(const unsigned char * stream){
-    stream += 2;
-    printf("Test:%x\n", stream);
-}
+
+
 int main() {
 
     FILE *imageInput;
@@ -638,9 +851,16 @@ int main() {
     unsigned int width = 0;
     unsigned int height = 0;
 
-    JpegDecoder(buffer, lengthOfJpegImage);
+    JpegDecoder(buffer, lengthOfJpegImage, &RGB, &width, &height);
+    delete[] buffer;
 
+    // Save it
+    WriteBMP24("", width, height, RGB);
 
-    return 0;
+    // Since we don't need the pixel information anymore, we must
+    // release this as well
+    delete[] RGB;
+
+    return 1;
 }
 
