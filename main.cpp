@@ -184,8 +184,8 @@ inline int ParseSOF(stJpegData *jdec, const unsigned char* stream){
         stream++;            //step over
         temp->m_qTable = jdec->m_Q_tables[*stream++];
     }
-    jdec->m_width = Y;
-    jdec->m_height = X;
+    jdec->m_width = X;
+    jdec->m_height = Y;
 
     return 0;
 }
@@ -436,7 +436,7 @@ int reservoirBits = 0;
 int bitInReservoir = 0;
 
 inline int FillKBits(const unsigned char **stream, int kBits){
-    while(bitInReservoir < reservoirBits){
+    while(bitInReservoir < kBits){
         const unsigned char nextByte = *(*stream)++;
         reservoirBits <<= 8;
         if(nextByte == 0xff && (**stream) == 0x00)
@@ -476,7 +476,7 @@ inline short GetNBits(const unsigned char **stream, int nbits_wanted) {
 
 
 void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
-    stComponent *stComponent = &jdata->m_component_info[indx];
+    stComponent *component = &jdata->m_component_info[indx];
 
 
     short DCT_tcoeff[64];
@@ -490,7 +490,7 @@ void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
         
         int code = LookKBits(&jdata->m_stream, k);
         
-        if (IsInHuffmanCodes(code, k, stComponent->m_dcTable->m_numBlocks, stComponent->m_dcTable->m_blocks, &decodedValue)) {
+        if (IsInHuffmanCodes(code, k, component->m_dcTable->m_numBlocks, component->m_dcTable->m_blocks, &decodedValue)) {
             // Skip over the rest of the bits now.
             SkipKBits(&jdata->m_stream, k);
 
@@ -499,15 +499,15 @@ void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
 
             // We know the next k bits are for the actual data
             if (numDataBits == 0) {
-                DCT_tcoeff[0] = stComponent->m_previousDC;
+                DCT_tcoeff[0] = component->m_previousDC;
             }
             else {
                 short data = GetNBits(&jdata->m_stream, numDataBits);
 
                 data = DetermineSign(data, numDataBits);
 
-                DCT_tcoeff[0] = data + stComponent->m_previousDC;
-                stComponent->m_previousDC = DCT_tcoeff[0];
+                DCT_tcoeff[0] = data + component->m_previousDC;
+                component->m_previousDC = DCT_tcoeff[0];
             }
 
             break;
@@ -526,7 +526,7 @@ void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
 
 
             // Check if its one of our huffman codes
-            if (IsInHuffmanCodes(code, k, stComponent->m_acTable->m_numBlocks, stComponent->m_acTable->m_blocks, &decodedValue)) {
+            if (IsInHuffmanCodes(code, k, component->m_acTable->m_numBlocks, component->m_acTable->m_blocks, &decodedValue)) {
 
                 // Skip over k bits, since we found the huffman value
                 SkipKBits(&jdata->m_stream, k);
@@ -568,7 +568,7 @@ void ProcessHuffmanDataUnit(stJpegData *jdata, int indx) {
 
 
     for (int j = 0; j < 64; j++) {
-        stComponent->m_DCT[j] = DCT_tcoeff[j];
+        component->m_DCT[j] = DCT_tcoeff[j];
     }
 
 }
@@ -683,7 +683,7 @@ inline void WriteBMP24(const char *szBmpFileName, int Width, int Height, unsigne
 
 
     char temp[1024] = {0};
-    sprintf(temp, "%s", "C:\\Users\\g2525_000\\ClionProjects\\JPEG\\gig-sn01.bmp");
+    sprintf(temp, "%s", szBmpFileName);
     FILE *fp = fopen(temp, "wb");
     fwrite(&bh, sizeof(bh), 1, fp);
     for (int y = Height - 1; y >= 0; y--) {
@@ -762,6 +762,7 @@ inline void DecodeMCU(stJpegData *jdata, int w, int h) {
     // Cr
     ProcessHuffmanDataUnit(jdata, cCr);
     DecodeSingleBlock(&jdata->m_component_info[cCr], jdata->m_Cr, 8);
+
 }
 
 
@@ -855,7 +856,7 @@ int main() {
     delete[] buffer;
 
     // Save it
-    WriteBMP24("", width, height, RGB);
+    WriteBMP24("E:\\gig-sn01.bmp", width, height, RGB);
 
     // Since we don't need the pixel information anymore, we must
     // release this as well
